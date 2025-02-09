@@ -27,6 +27,9 @@ TIMER0_RATE   EQU 4096     ; 2048Hz squarewave (peak amplitude of CEM-1203 speak
 TIMER0_RELOAD EQU ((65536-(CLK/TIMER0_RATE)))
 TIMER2_RATE   EQU 1000     ; 1000Hz, for a timer tick of 1ms
 TIMER2_RELOAD EQU ((65536-(CLK/TIMER2_RATE)))
+BAUD              EQU 115200 ; Baud rate of UART in bps
+TIMER1_RELOAD     EQU (0x100-(CLK/(16*BAUD)))
+TIMER0_RELOAD_1MS EQU (0x10000-(CLK/1000))
 
 START_BUTTON  equ P1.5
 SOUND_OUT     equ P1.7
@@ -78,6 +81,12 @@ Time_refl: ds 1
 bseg
 half_seconds_flag: dbit 1 ; Set to one in the ISR every time 500 ms had passed
 
+PB0: dbit 1  ; Pushbutton 0 
+PB1: dbit 1  ; Pushbutton 1 
+PB2: dbit 1  ; Pushbutton 2 
+PB3: dbit 1  ; Pushbutton 3 
+PB4: dbit 1  ; Pushbutton 4
+
 cseg
 ; These 'equ' must match the hardware wiring
 LCD_RS equ P1.3
@@ -88,6 +97,7 @@ LCD_D5 equ P0.1
 LCD_D6 equ P0.2
 LCD_D7 equ P0.3
 
+
 $NOLIST
 $include(LCD_4bit.inc) ; A library of LCD related functions and utility macros
 $LIST
@@ -95,7 +105,7 @@ $LIST
 ;                     1234567890123456    <- This helps determine the location of the counter
 Initial_Message:  db 'BCD_counter: xx ', 0
 Initial_State:  db 'State:       xx ', 0
-
+Soak_Display:    db 'S:xx T:xx R:xx T:xx', 0
 
 ;---------------------------------;
 ; Routine to initialize the ISR   ;
@@ -197,6 +207,79 @@ Timer2_ISR_done:
 	pop acc
 	reti
 
+wait_1ms:
+	clr	TR0 ; Stop timer 0
+	clr	TF0 ; Clear overflow flag
+	mov	TH0, #high(TIMER0_RELOAD_1MS)
+	mov	TL0,#low(TIMER0_RELOAD_1MS)
+	setb TR0
+	jnb	TF0, $ ; Wait for overflow
+	ret
+
+waitms:
+	lcall wait_1ms
+	djnz R2, waitms
+	ret
+
+LCD_PB:
+	; Set variables to 1: 'no push button pressed'
+	setb PB0
+	setb PB1
+	setb PB2
+	setb PB3
+	setb PB4
+	; The input pin used to check set to '1'
+	setb P1.5
+	
+	; Check if any push button is pressed
+	clr P0.0
+	clr P0.1
+	clr P0.2
+	clr P0.3
+	clr P1.3
+	jb P1.5, LCD_PB_Done
+
+	; Debounce
+	mov R2, #50
+	lcall waitms
+	jb P1.5, LCD_PB_Done
+
+	; Set the LCD data pins to logic 1
+	setb P0.0
+	setb P0.1
+	setb P0.2
+	setb P0.3
+	setb P1.3
+	
+	; Check the push buttons one by one
+	clr P1.3
+	mov c, P1.5
+	mov PB4, c
+	setb P1.3
+
+	clr P0.0
+	mov c, P1.5
+	mov PB3, c
+	setb P0.0
+	
+	clr P0.1
+	mov c, P1.5
+	mov PB2, c
+	setb P0.1
+	
+	clr P0.2
+	mov c, P1.5
+	mov PB1, c
+	setb P0.2
+	
+	clr P0.3
+	mov c, P1.5
+	mov PB0, c
+	setb P0.3
+
+LCD_PB_Done:		
+	ret
+
 ;---------------------------------;
 ; Main program. Includes hardware ;
 ; initialization and 'forever'    ;
@@ -224,6 +307,10 @@ main:
     setb half_seconds_flag
 	mov BCD_counter, #0x00
 	mov state, #0x00
+	mov Temp_soak, #0x00
+	mov Time_soak, #0x00
+	mov Temp_refl, #0x00
+	mov Time_refl, #0x00
 	
 	; After initialization the program stays in this 'forever' loop
 loop:
@@ -263,10 +350,75 @@ state0: ; Start button dependent
 	clr TR2                 ; Stop timer 2
 	clr a
 	lcall update_LCD
-	    
-    jb start_button, state0
+	
+	;display the state
+	Set_Cursor(1, 1)
+    Send_Constant_String(#Initial_State)
+	;display the data
+    Set_Cursor(2, 1)
+    Send_Constant_String(#Soak_Display)
+
+check_button1:
+    lcall LCD_PB; get the pushbuttons value
+
+	jb PB1, check_button2
+	wait_milli_seconds(#50)  ; debounce
+	jb PB1, check_button2
+	jnb PB1, $
+
+	mov a, Temp_soak
+	add a, #1
+	mov Temp_soak, a
+	lcall update_LCD
+
+check_button2:
+    lcall LCD_PB; get the pushbuttons value
+
+	jb PB2, check_button3
+	wait_milli_seconds(#50)  ; debounce
+	jb PB2, check_button3
+	jnb PB2, $
+
+	mov a, Time_soak
+	add a, #1
+	mov Time_soak, a
+	lcall update_LCD
+
+check_button3:
+    lcall LCD_PB; get the pushbuttons value
+
+	jb PB3, check_button4
+	wait_milli_seconds(#50)  ; debounce
+	jb PB3, check_button4
+	jnb PB3, $
+
+	mov a, Temp_refl
+	add a, #1
+	mov Temp_refl, a
+	lcall update_LCD
+
+check_button4:
+    lcall LCD_PB; get the pushbuttons value
+
+	jb PB4, state0_done
+	wait_milli_seconds(#50)  ; debounce
+	jb PB4, state0_done
+	jnb PB4, $
+
+	mov a, Time_refl
+	add a, #1
+	mov Time_refl, a
+	lcall update_LCD
+
+state0_done:
+    jb start_button, skip1
+    ljmp check_button1
+    
+skip1:
     wait_milli_seconds(#50)  ; debounce
-    jb start_button, state0
+    jb start_button, skip2
+    ljmp check_button1
+skip2:
     jnb start_button, $
     
     sjmp state1
@@ -310,7 +462,9 @@ state3_loop:
 	clr c
 	mov a, BCD_counter
     subb a, sec_threshold
-    jnc state0
+    jnc skip3
     sjmp state3_loop
-
+    
+skip3:
+    ljmp state0
 END
